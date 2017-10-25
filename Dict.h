@@ -31,41 +31,178 @@ struct IdentityOrEquality
 
 };
 
+template <class Key>
+struct KeyInfo
+{
+	KeyInfo(const Key & k):
+		hash_(0), index_(std::numeric_limits<size_t>::max()), key_(&k)
+	{
+		
+	}
+	KeyInfo(const Key & k, std::size_t hash_v, std::size_t container_length):
+		hash_(0), index_(std::numeric_limits<size_t>::max()), key_(&k)
+	{
+		
+	}
+	std::size_t hash_;
+	std::size_t index_;
+	const Key * key_;
+	std::size_t hash() const { return hash_; }
+	std::size_t index() const { return index_; }
+	const Key & key() const { return *key_; }
+};
 template <class Key, class Value>
 struct DictNode
 {
-	static constexpr const std::size_t graveyard_value = std::numeric_limits<std::size_t>::max();
+	using kvp_t = std::pair<const Key, Value>;
+	using self_type = DictNode<Key, Value>;
+	using dual_validity_t = enum dual_validity_: unsigned {
+		BOTH_INVALID = get_dual_validity(false, false),
+		OTHER_VALID_ONLY = get_dual_validity(false, true),
+		SELF_VALID_ONLY = get_dual_validity(true, false),
+		BOTH_VALID = get_dual_validity(true, true)
+	};
+	static constexpr const std::size_t tombstone_value = std::numeric_limits<std::size_t>::max();
+	static constexpr const std::size_t end_sentinal_value = std::numeric_limits<std::size_t>::max() - 1;
+	static constexpr unsigned get_dual_validity(const bool self, const bool other)
+	{
+		return (unsigned(self) << 1) | (unsigned(other));
+	}
+	static constexpr bool hash_valid(const std::size_t hash_v)
+	{
+		return hash_v < end_sentinal_value;
+	}
 	DictNode() = default;
-	template <class K, class V>
-	DictNode(std::size_t hash_v, K&& k, V&& v):
-		hash(hash_v), key(std::forward<K>(k)), value(std::forward<V>(v))
+	template <class ... Args>
+	DictNode(std::size_t hash_v, Args&& ... args):
+		hash(hash_v), key_value_pair(std::forward<Args>(args)...)
 	{
 		
 	}
-	template <class K>
-	DictNode(std::size_t hash_v, K&& k):
-		hash(hash_v), key(std::forward<K>(k)), value()
+	DictNode():
+		hash(end_sentinal_value), key_value_pair()
 	{
-		
+		destroy_kvp();
 	}
-	std::size_t hash;
-	Key key;
-	Value value;
+	DictNode(const self_type & other):
+		hash_(other.hash()), key_value_pair((other.is_valid() ? other.kvp() : kvp_t()))
+	{
+		if(not other.is_valid())
+			destroy_kvp();
+	}
+	DictNode(self_type && other):
+		hash_(other.hash()), key_value_pair((other.is_valid() ? std::move(other.kvp()) : kvp_t()))
+	{
+		if(not other.is_valid())
+			destroy_kvp();
+	}
+	~DictNode()
+	{
+		if(not is_valid())
+			revive(0);
+	}
+	self_type& operator=(const self_type & other)
+	{
+		return assign_from(dual_validity_with(other), other);
+	}
+	self_type& operator=(self_type && other)
+	{
+		return assign_from(dual_validity_with(other), std::move(other));
+	}
+	
+	void destroy_kvp()
+	{
+		kvp().~kvp_t();
+	}
 	bool is_grave() const 
 	{
-		return hash == graveyard_value;
+		return hash() == graveyard_value;
 	}
 	void set_grave()
 	{
-		hash = graveyard_value;
+		destroy_kvp();
+		hash = tombstone_value;
 	}
-	void swap(DictNode<Key, Value> & other) noexcept(std::is_nothrow_swappable<Key>::value and 
-							 std::is_nothrow_swappable<Value>::value)
+	template <class ... Args>
+	void revive(std::size_t hash_v, Args&& ... args) noexcept(std::is_nothrow_constructible<kvp_t>::value)
 	{
-		std::swap(key, other.key);
-		std::swap(value, other.value);
-		std::swap(hash, other.hash);
+		new (&(kvp())) kvp_t(std::forward<Args>(args) ... ); 
+		hash = hash_v;
 	}
+	template <class K, class ... Args>
+	void revive_key_with_value_args(std::size_t hash_v, K&& k, Args&& ... args) noexcept(std::is_nothrow_constructible<kvp_t>::value)
+	{
+		revive(hash_v, std::piecewise_construct(), 
+			       std::forward_as_tuple(std::forward<K>(k)), 
+			       std::forward_as_tuple(std::forward<Args>(args)...));
+	}
+	void set_end_sentinal() const
+	{
+		hash_ = end_sentinal;
+	}
+	bool is_end_sentinal() const
+	{
+		return hash() == end_sentinal_value;
+	}
+	bool is_valid() const
+	{
+		return hash_valid(hash());
+	}
+	const kvp_t & kvp() const
+	{
+		return *std::launder(&key_value_pair);
+	}
+	kvp_t & kvp()
+	{
+		return *std::launder(&key_value_pair);
+	}
+	const Key & key() const
+	{
+		return kvp().first;
+	}
+	const Value& value() const
+	{
+		return kvp().second;
+	}
+	Value& value() 
+	{
+		return kvp().second;
+	}
+			
+	const std::size_t& hash() const noexcept
+	{
+		return hash_;
+	}
+
+private:
+	template <class OtherDictNode>
+	self_type& assign_from(const dual_validity_t validity, OtherDictNode&& other)
+	{
+		switch(validity)
+		{
+		case BOTH_INVALID:
+			hash_ = other.hash();
+			break;	
+		case OTHER_VALID_ONLY:
+			revive(other.hash(), std::forward<kvp_t>(other.kvp()));
+			break;	
+		case SELF_VALID_ONLY:
+			destroy_kvp();
+			hash_ = other.hash();
+			break;	
+		case BOTH_VALID:
+			hash_ = other.hash();
+			kvp() = std::forward<kvp_t>(other.kvp());
+			break;
+		}
+		return *this;
+	}
+	constexpr dual_validity_t dual_validity_with(const self_type & other) const
+	{
+		return get_dual_validity(self.is_valid(), other.is_valid());
+	}
+	std::size_t hash_;
+	kvp_t key_value_pair_;
 };
 
 
@@ -103,21 +240,6 @@ struct LinearAddresser
 };
 
 
-template <class Key>
-struct KeyInfo
-{
-	KeyInfo(const Key & k):
-		hash_(0), index_(std::numeric_limits<size_t>::max()), key_(&k)
-	{
-		
-	}
-	std::size_t hash_;
-	std::size_t index_;
-	const Key * key_;
-	std::size_t hash() const { return hash_; }
-	std::size_t index() const { return index_; }
-	const Key & key() const { return *key_; }
-};
 
 template <class Key, 
 	  class Value, 
@@ -131,112 +253,88 @@ template <class Key, class Value>
 class HashDictIterator: 
 	public boost::iterators::iterator_facade<
 		HashDictIterator<Key, Value>,
-		std::pair<const Key&, Value&>,
-		std::random_access_iterator_tag,
-		std::pair<std::reference_wrapper<const Key>, std::reference_wrapper<Value>>&>
+		std::pair<const Key, Value>,
+		std::forward_iterator_tag,
+		std::pair<const Key, Value>&>
 {
-private:
-	using key_value_pair_t = std::pair<std::reference_wrapper<const Key>, std::reference_wrapper<Value>>;
-	using facade_base_t = boost::iterators::iterator_facade<
-				HashDictIterator<Key, Value>,
-				std::pair<const Key&, Value&>,
-				std::forward_iterator_tag,
-				key_value_pair_t&>;
-	using self_type = HashDictIterator<Key, Value>;
 	using iter_t = typename std::vector<DictNode<Key, Value>>::iterator;
+	using self_type = HashDictIterator<Key, Value>;
 public:
-	using reference = key_value_pair_t&;
-	using value_type = std::pair<const Key&, Value&>;
-	using pointer = key_value_pair_t*;
+	using value_type = std::pair<const Key, Value>;
+	using reference = value_type&;
+	using pointer = value_type*;
 	using difference_type = std::ptrdiff_t;
 	using iterator_category = std::forward_iterator_tag;
 	HashDictIterator() = default;
-	HashDictIterator(iter_t it, iter_t end):
-		kvp_(it->key, it->value), it_{it}, end_{end} 
+	HashDictIterator(iter_t it):
 	{
 		
 	}
 private:
+	
 	reference dereference() const
 	{
-		kvp_.first = std::cref(it_->key);
-		kvp_.second = std::ref(it_->value);
-		return kvp_;
+		return it_->kvp(); 
 	}
-	bool equal(const HashDictIterator& other) const
+	bool equal(const self_type& other) const
 	{
-		return std::distance(it_, other.it_) == 0;
+		return it_ == other.it_;
 	}
 	void increment()
 	{
-		++it_;
-		while(it_ < end_ and it_->is_grave())
+		while(it_->is_grave() and (not it_->is_end_sentinal))
 			++it_;
 	}
-	mutable std::pair<std::reference_wrapper<const Key>, std::reference_wrapper<Value>> kvp_;
 	iter_t it_;
-	iter_t end_;
 	friend class boost::iterator_core_access;
 	template <class K, class V, class H, class KE, class A, class SP> friend class HashDict; 
 };
-		
 
 template <class Key, class Value>
 class ConstHashDictIterator: 
 	public boost::iterators::iterator_facade<
-		HashDictIterator<Key, Value>,
-		std::pair<const Key&, const Value&>,
-		std::random_access_iterator_tag,
-		const std::pair<std::reference_wrapper<const Key>, const std::reference_wrapper<Value>>&>
+		ConstHashDictIterator<Key, Value>,
+		std::pair<const Key, Value>,
+		std::forward_iterator_tag,
+		const std::pair<const Key, Value>&>
 {
-private:
-	using key_value_pair_t = std::pair<std::reference_wrapper<const Key>, std::reference_wrapper<Value>>;
-	using facade_base_t = boost::iterators::iterator_facade<
-				HashDictIterator<Key, Value>,
-				std::pair<const Key&, Value&>,
-				std::forward_iterator_tag,
-				key_value_pair_t&>;
-	using self_type = ConstHashDictIterator<Key, Value>;
 	using iter_t = typename std::vector<DictNode<Key, Value>>::const_iterator;
+	using self_type = ConstHashDictIterator<Key, Value>;
 public:
-	ConstHashDictIterator(iter_t it, iter_t end):
-		kvp_(it->key, it->value), it_{it}, end_{end} 
-	{
-		
-	}
-	ConstHashDictIterator(HashDictIterator<Key, Value> it):
-		kvp_{}, it_{it.it_}, end_{it.end_} 
-	{
-		
-	}
-	using reference = const key_value_pair_t&;
-	using value_type = std::pair<const Key&, const Value&>;
-	using pointer = const key_value_pair_t*;
+	using value_type = std::pair<const Key, Value>;
+	using reference = value_type&;
+	using pointer = value_type*;
 	using difference_type = std::ptrdiff_t;
 	using iterator_category = std::forward_iterator_tag;
-private:
-	reference dereference() const
+	HashDictIterator() = default;
+	HashDictIterator(iter_t it):
 	{
-		kvp_.first = std::cref(it_->key);
-		kvp_.second = std::cref(it_->value);
-		return kvp_;
+		
 	}
-	bool equal(const ConstHashDictIterator<Key, Value>& other) const
+	HashDictIterator(HashDictIterator<Key, Value> it):
+		it_(it.it_)
 	{
-		return std::distance(it_, other.it_) == 0;
+		
+	}
+private:
+	const reference dereference() const
+	{
+		return it_->kvp(); 
+	}
+	bool equal(const self_type& other) const
+	{
+		return it_ == other.it_;
 	}
 	void increment()
 	{
-		++it_;
-		while(it_ < end_ and it_->is_grave())
+		while(it_->is_grave() and (not it_->is_end_sentinal))
 			++it_;
 	}
-	mutable std::pair<std::reference_wrapper<const Key>, std::reference_wrapper<Value>> kvp_;
 	iter_t it_;
-	iter_t end_;
 	friend class boost::iterator_core_access;
 	template <class K, class V, class H, class KE, class A, class SP> friend class HashDict; 
 };
+		
 
 
 
@@ -324,7 +422,7 @@ public:
 	 */
 	float load_factor() const
 	{
-		return float(count_) / indices_.size();
+		return float(count_) / slot_count();
 	}
 	float max_load_factor() const
 	{
@@ -337,7 +435,7 @@ public:
 	void rehash(size_t requested_size)
 	{
 		const size_type newsize = size_policy_(requested_size, count_, max_load_factor());
-		if((newsize != indices_.size()) or (requested_size == 0))
+		if((newsize != slot_count()) or (requested_size == 0))
 		{
 			make_indices_empty();
 			indices_.resize(newsize, index_empty);
@@ -585,18 +683,16 @@ public:
 		if(not check_load_factor())
 		{
 			--count_;
-			data_.emplace_back(hash_value, std::forward<K>(k), mapped_type(std::forward<ValueArgs>(args)...));
+			data_emplace_back(hash_value, std::forward<K>(k), mapped_type(std::forward<ValueArgs>(args)...));
 			++count_;
 			ensure_load_factor();
-			return data_.back().value;
+			return data_back().value();
 		}
 		else
 		{
 			--count_;
 			auto & node = data_[*pos];
-			node.value = mapped_type(std::forward<ValueArgs>(args)...);
-			node.key = std::forward<K>(k);
-			node.hash = hash_value;
+			node.revive_key_with_value_args(hash_value, std::forward<K>(k), std::forward<ValueArgs>(args)...);
 			++count_;
 			return node.value;
 		}
@@ -655,7 +751,7 @@ public:
 	 */
 	size_type bucket_count() const
 	{
-		data_.size();
+		return data_.size() - 1;
 	}
 	size_type max_bucket_count() const
 	{
@@ -772,13 +868,9 @@ private:
 		{
 			pos += *slot;
 			if constexpr(DontOverwrite)
-			{
 				return {iterator(pos, data_.end()), true};
-			}
 			else
-			{
 				emplace_mapped_value(pos, std::forward<ValueArgs>(v)...);
-			}
 		}
 		else
 		{
@@ -825,26 +917,26 @@ private:
 	}
 	void size_increase_to(const size_type sz)
 	{
-		assert(sz > indices_.size());
+		assert(sz > slot_count());
 		make_indices_empty();
 		indices_.resize(sz, index_empty);
 		reindex();
 	}
 	void size_decrease_to(const size_type sz)
 	{
-		assert(sz < indices_.size());
+		assert(sz < slot_count());
 		indices_.resize(sz, index_empty);
 		make_indices_empty();
 		reindex();
 	}
 	void size_up()
 	{
-		const size_t new_size = size_policy_.template next_size<true>(indices_.size());
+		const size_t new_size = size_policy_.template next_size<true>(slot_count());
 		size_increase_to(new_size);
 	}
 	void size_down()
 	{
-		const size_t new_size = size_policy_.template next_size<false>(indices_.size());
+		const size_t new_size = size_policy_.template next_size<false>(slot_count());
 		size_decrease_to(new_size);
 	}
 	void compactify_data()
@@ -879,7 +971,7 @@ private:
 			for(std::size_t i = 0; i < data_.size(); ++i)
 			{
 				const auto & node = data_[i];
-				idx = (node.hash % indices_.size());
+				idx = (node.hash % slot_count());
 				pos = addresser_(indices_.begin(), indices_.end(), indices_.begin() + idx, is_empty);
 				if(pos == indices_.end())
 				{
@@ -896,9 +988,9 @@ private:
 	}
 	key_info make_key_info(const key_type & k) const
 	{
-		key_info ki(k);
+		key_info ki(k, hash_adjust, slot_count());
 		ki.hash_ = hash_adjust(hasher_(k));
-		ki.index_ = (ki.hash() % indices_.size());
+		ki.index_ = (ki.hash() % slot_count());
 		return ki;
 	}
 	index_vector_type::const_iterator find_insert(const key_info& ki, bool & found_grave, bool & found_existing) const
@@ -1012,11 +1104,38 @@ private:
 		// TODO:  maybe implement this to take advantage of fast modulo 2
 		//        depends on whether compiler takes full advantage of PowersOfTwoPolicy
 	}
-	static std::size_t hash_adjust(std::size_t h) 
+	template <class K, class ... Args>
+	node_t & data_emplace_back(std::size_t hash_v, K && k, Args && ... args)
 	{
-		return h * (h != node_t::graveyard_value);
+		data_.emplace_back();
+		if constexpr(sizeof ... (args) > 1)
+		{
+			data_back()->revive(hash_v, std::piecewise_construct{}, 
+							  std::forward_as_tuple(std::forward<K>(k)), 
+							  std::forward_as_tuple(std::forward<Args>(args)));
+		}
+		else
+		{
+			data_back()->revive(hash_v, std::forward<K>(k), std::forward<Args>(args)...);
+		}
+		return data_back(); 
 	}
-	
+	const node_t & data_back() const
+	{
+		return *(data_.cend() - 2);
+	}
+	node_t & data_back() 
+	{
+		return *(data_.end() - 2);
+	}
+	static std::size_t hash_adjust(std::size_t h) const
+	{
+		return h * node_t::hash_valid(h);
+	}
+	size_type slot_count() const
+	{
+		return indices_.size();
+	}
 
 	index_vector_type indices_;
 	data_vector_type data_;
