@@ -151,9 +151,8 @@ struct DictNode
 		revive(tombstone_value, std::forward<Args>(args)...);
 		hash_ = hasher(key());
 	}
-	void set_end_sentinal() const
+	void set_end_sentinal() 
 	{
-		assert(not is_valid());
 		hash_ = end_sentinal_value;
 	}
 	bool is_end_sentinal() const
@@ -337,8 +336,8 @@ class ConstHashDictIterator:
 	using self_type = ConstHashDictIterator<Key, Value>;
 public:
 	using value_type = std::pair<const Key, Value>;
-	using reference = value_type&;
-	using pointer = value_type*;
+	using reference = const value_type&;
+	using pointer = const value_type*;
 	using difference_type = std::ptrdiff_t;
 	using iterator_category = std::forward_iterator_tag;
 	ConstHashDictIterator() = default;
@@ -353,7 +352,7 @@ public:
 		
 	}
 private:
-	const reference dereference() const
+	reference dereference() const
 	{
 		return it_->kvp(); 
 	}
@@ -399,18 +398,22 @@ class HashDict
 	
 public:
 	using key_type = Key;
-	using value_type = std::pair<const Key&, Value&>;
-	using const_value_type = std::pair<const Key&, const Value&>;
+	using value_type = std::pair<const Key, Value>;
 	using mapped_type = Value;
 	using size_type = std::size_t;
 	using difference_type = std::ptrdiff_t;
 	using hasher = Hash;
 	using key_equal = KeyEqual;
-	using reference = value_type;
+	using reference = value_type&;
+	using const_reference = const value_type &;
 	using addresser = LinearAddresser;
 	using size_policy = SizePolicy;
 	using iterator = HashDictIterator<Key, Value>;
 	using const_iterator = ConstHashDictIterator<Key, Value>;	
+	using local_iterator = iterator;
+	using const_local_iterator = const_iterator;
+	using pointer = value_type*;
+	using const_pointer = const value_type *;
 	/*
 	 * CONSTRUCTORS
 	 */
@@ -422,7 +425,7 @@ public:
 	HashDict(size_type bucks, 
 		 const hasher& h = hasher(), 
 		 const key_equal& ke = key_equal(),
-		 const addresser& a = size_policy(),
+		 const addresser& a = addresser(),
 		 const size_policy& sp = size_policy()): 
 		HashDict()
 	{
@@ -438,7 +441,7 @@ public:
 		 size_type bucks = 8,
 		 const hasher& h = hasher(), 
 		 const key_equal& ke = key_equal(),
-		 const addresser& a = size_policy(),
+		 const addresser& a = addresser(),
 		 const size_policy& sp = size_policy()): 
 		HashDict(bucks, h, ke, a, sp)
 	{
@@ -449,13 +452,24 @@ public:
 		 size_type bucks = 8,
 		 const hasher& h = hasher(), 
 		 const key_equal& ke = key_equal(),
-		 const addresser& a = size_policy(),
+		 const addresser& a = addresser(),
 		 const size_policy& sp = size_policy()): 
 		HashDict(ilist.begin(), ilist.end(), bucks, h, ke, a, sp)
 	{
 
 	}
 	
+	/*
+	 * EQUALITY
+	 */ 
+	bool operator==(const self_type & other) const
+	{
+		return (size() == other.size()) and std::is_permutation(cbegin(), cend(), other.cbegin(), other.cend());
+	}
+	bool operator !=(const self_type & other) const
+	{
+		return not ((*this) == other);
+	}
 	
 	/*
 	 * HASH POLICY
@@ -515,7 +529,7 @@ public:
 	}
 	const_iterator cend() const
 	{
-		return const_iterator(data_.cend() - 1);
+		return const_iterator(data_end_sentinal_pos());
 	}
 
 	/*
@@ -540,29 +554,38 @@ public:
 	{
 		make_indices_empty();
 		data_.resize(1);
-		data_.back().set_end_sentinal();
+		data_end_sentinal_pos()->set_end_sentinal();
 		count_ = 0;
 	}
 	// insertion	
-	
-	template <class P>
+	std::pair<iterator, bool> insert(const value_type & v)
+	{
+		key_info ki = make_key_info(v.first);
+		return make_emplacement<true>(ki, v.first, v.second);
+	}
+	std::pair<iterator, bool> insert(value_type && v)
+	{
+		key_info ki = make_key_info(v.first);
+		return make_emplacement<true>(ki, v.first, std::move(v.second));
+	}
+	template <class P, class = std::enable_if_t<std::is_constructible_v<value_type, P&&>>>
 	std::pair<iterator, bool> insert(P&& p)
 	{
-		return emplace(std::get<0>(std::forward<P>(p)), std::get<1>(std::forward<P>(p)));
+		return emplace(std::forward<P>(p));
 	}
 	template <class P>
 	std::pair<iterator, bool> insert(const_iterator hint, P&& p)
 	{
 		return insert(std::forward<P>(p));
 	}
-	template <class InputIt>
+	template <class InputIt> 
 	void insert(InputIt first, InputIt last)
 	{
 		// TODO: use TMP to see if we can check which keys already exist before inserting.
 		//       of course measure to see that it's actually faster!
 		size_type len = std::distance(first, last);
 		while(first != last)
-			insert(*first);
+			insert(*first++);
 	}
 	template <class P>
 	void insert(std::initializer_list<P> ilist)
@@ -729,7 +752,7 @@ public:
 	}
 	void undo_emplace_maybe()
 	{
-		data_last().set_end_sentinal();
+		data_last()->set_end_sentinal();
 		data_.pop_back();
 	}
 	bool check_load_factor()
@@ -852,7 +875,7 @@ private:
 	std::pair<const_iterator, const_iterator> const_equal_range(const key_type & k) const
 	{
 		auto pos = find(k);
-		if(pos.it_ == pos.end_)
+		if(pos == cend())
 			return {pos, pos};
 		return {pos, std::next(pos)};
 	}
@@ -861,7 +884,7 @@ private:
 		auto [it, ki, short_circuit]  = find_existing_from_key(k);
 		if(short_circuit)
 			return cend();
-		return const_iterator(it, data_.cend());
+		return const_iterator(data_.cbegin() + *it);
 	}
 	iterator to_non_const_iterator(const const_iterator& it) 
 	{
@@ -887,7 +910,7 @@ private:
 		auto [it, ki, sc] = find_existing_from_key(k);
 		return std::make_tuple(to_non_const_iterator(it), ki, sc);
 	}
-	auto find_insert_from_key(const key_type & k) const
+	auto find_insert_no_check_past_graves_from_key(const key_type & k) const
 	{
 		key_info ki = make_key_info(k);
 		bool found_grave = false;
@@ -895,11 +918,32 @@ private:
 		auto it = find_insert(ki, found_grave, found_existing);
 		return std::make_tuple(it, ki, found_grave, found_existing);
 	}
+	auto find_insert_no_check_past_graves_from_key(const key_type & k)
+	{
+		auto [it, ki, fg, fe] = static_cast<const self_type*>(this)->find_insert_no_check_past_graves_from_key(k);
+		return std::make_tuple(to_non_const_iterator(it), ki, fg, fe);
+	}
+	auto find_insert_from_key(const key_type & k) const
+	{
+		auto [it, ki, fg, fe] = find_insert_no_check_past_graves_from_key(k);
+		if(fg)
+		{
+			assert(not fe);
+			auto pos = check_for_existing_from(ki, it);
+			if(pos == indices_.end())
+				return std::make_tuple(it, ki, fg, fe);
+			else    // substitute in the actual position
+				return std::make_tuple(pos, ki, false, true);
+		}
+		else
+			return std::make_tuple(it, ki, fg, fe);
+	}
 	auto find_insert_from_key(const key_type & k)
 	{
 		auto [it, ki, fg, fe] = static_cast<const self_type*>(this)->find_insert_from_key(k);
 		return std::make_tuple(to_non_const_iterator(it), ki, fg, fe);
 	}
+
 	auto find_insert_ignore_graves_from_key(const key_type & k) const
 	{
 		key_info ki = make_key_info(k);
@@ -1222,6 +1266,10 @@ private:
 	auto data_last()
 	{
 		return data_.end() - 2;
+	}
+	auto data_end_sentinal_pos() const
+	{
+		return data_.end() - 1;
 	}
 	static std::size_t hash_adjust(std::size_t h) 
 	{
